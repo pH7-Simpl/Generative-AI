@@ -1,53 +1,69 @@
 from abc import ABC, abstractmethod
+from typing import Dict
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+import os
+import json
+from src.training_history import TrainingHistory
+import time
 from torch.utils.data import DataLoader
 
 class ImageGeneratorBaseModel(nn.Module, ABC):
-    def __init__(self, device):
+
+    def __init__(
+        self,
+        latent_dim: int,
+        device: str = "cuda",
+    ):
         super().__init__()
+
         self.device = device
+        self.latent_dim = latent_dim
+
         self.name = self.__class__.__name__
-        
+
+        self.image_shape = (1, 28, 28)
+
+        self.history = TrainingHistory()
+
+        self.to(device)
+
     def __str__(self):
         return self.name
-    
-    @abstractmethod
-    def train_step(self, batch):
-        """
-        Harus return dictionary metric/loss.
 
-        Contoh:
-        {
-            "loss": 0.123,
-            "recon_loss": 0.100
-        }
-        """
+    @abstractmethod
+    def train_step(
+        self,
+        batch
+    ) -> Dict[str, float]:
         pass
 
     @abstractmethod
     def generate(self, num_samples: int):
-        """
-        Generate image baru.
-        """
         pass
 
-    def fit(
+    def get_config(self):
+        return {
+            "model_class": self.__class__.__name__,
+            "latent_dim": self.latent_dim,
+            "device": str(self.device),
+        }
+
+    def train_model(
         self,
         dataloader: DataLoader,
         epochs: int = 10,
         verbose: bool = True,
-    ):
+        save_path: str = None,
+    ) -> TrainingHistory:
+
         self.train()
 
-        from training_history import TrainingHistory
-        history = TrainingHistory()
-
+        total_start_time = time.time()
         for epoch in range(epochs):
-
+            epoch_start = time.time()
             epoch_metrics = {}
             total_batches = 0
 
@@ -61,39 +77,61 @@ class ImageGeneratorBaseModel(nn.Module, ABC):
                 metrics = self.train_step(batch)
 
                 for key, value in metrics.items():
+
                     epoch_metrics[key] = (
                         epoch_metrics.get(key, 0.0)
                         + float(value)
                     )
 
                 total_batches += 1
+            
+            epoch_time = time.time() - epoch_start
+            epoch_metrics["epoch_time"] = epoch_time
+
+            if total_batches == 0:
+                continue
 
             for key in epoch_metrics:
                 epoch_metrics[key] /= total_batches
 
-            history.add(epoch_metrics)
+            self.history.add(epoch_metrics)
 
             if verbose:
+                self.history.print_latest()
+        
+        total_time = time.time() - total_start_time
+        print(f"\n=== Training Complete ===")
+        print(f"  Total Time: {total_time:.2f}s ({total_time/60:.2f}m)")
 
-                metrics_text = " | ".join(
-                    f"{k}: {v:.4f}"
-                    for k, v in epoch_metrics.items()
-                )
+        if save_path is not None:
+            self.save_model(save_path)
 
-                print(
-                    f"Epoch [{epoch+1}/{epochs}] "
-                    f"{metrics_text}"
-                )
+        return self.history
 
-        return history
+    def save_model(self, save_path: str):
+
+        os.makedirs(save_path, exist_ok=True)
+
+        torch.save(self.state_dict(), os.path.join(save_path, "model.pt"))
+
+        with open(os.path.join(save_path, "config.json"), "w") as f:
+            json.dump(self.get_config(), f, indent=4)
+
+        self.history.save(save_path)
+
+        print(f"Model saved to: {save_path}")
 
     @torch.no_grad()
     def sample(self, num_samples: int = 16):
+
+        was_training = self.training
+
         self.eval()
 
         samples = self.generate(num_samples)
 
-        self.train()
+        if was_training:
+            self.train()
 
         return samples
 
@@ -106,10 +144,11 @@ class VAE(ImageGeneratorBaseModel):
         lr: float = 1e-3,
         device=None
     ):
-        super().__init__(device=device)
+        super().__init__(latent_dim=latent_dim, device=device)
         self.input_dim = input_dim
         self.latent_dim = latent_dim
 
+        # region Encoder
         # =====================================================
         # Encoder
         #
@@ -133,6 +172,7 @@ class VAE(ImageGeneratorBaseModel):
         self.fc_mu = nn.Linear(hidden_dim, latent_dim)
         self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
 
+        # region Decoder
         # =====================================================
         # Decoder
         #
@@ -219,7 +259,7 @@ class VAE(ImageGeneratorBaseModel):
         mu,
         logvar,
     ):
-        
+        # region Reconstruction Loss
         # =====================================================
         # Reconstruction Loss
         #
@@ -235,6 +275,7 @@ class VAE(ImageGeneratorBaseModel):
             x,
         )
         
+        # region KL Loss
         # =====================================================
         # KL Divergence Loss
         #
@@ -295,9 +336,7 @@ class VAE(ImageGeneratorBaseModel):
 
         samples = samples.view(
             num_samples,
-            1,
-            28,
-            28
+            *self.image_shape
         )
         samples = samples.cpu()
 
@@ -321,10 +360,11 @@ class GAN(ImageGeneratorBaseModel):
         lr: float = 2e-4,
         device=None
     ):
-        super().__init__(device=device)
+        super().__init__(latent_dim=latent_dim, device=device)
         self.input_dim = input_dim
         self.latent_dim = latent_dim
 
+        # region Generator GAN
         # =====================================================
         # Generator
         #
@@ -336,7 +376,6 @@ class GAN(ImageGeneratorBaseModel):
         # =====================================================
 
         self.generator = nn.Sequential(
-
             nn.Linear(latent_dim, hidden_dim),
             nn.ReLU(),
 
@@ -347,6 +386,7 @@ class GAN(ImageGeneratorBaseModel):
             nn.Sigmoid(),
         )
 
+        # region  Discriminator GAN
         # =====================================================
         # Discriminator
         #
@@ -547,9 +587,7 @@ class GAN(ImageGeneratorBaseModel):
 
         samples = samples.view(
             num_samples,
-            1,
-            28,
-            28
+            *self.image_shape
         )
 
         samples = samples.cpu()
