@@ -147,7 +147,7 @@ class PretrainedEmbedder(nn.Module):
         return {
             "model_name": self.model_name,
             "projection_dim": self.projection_dim,
-            "device": self.device,
+            "device": str(self.device),
         }
 
 class RMSNorm(nn.Module):
@@ -232,7 +232,7 @@ class BaseTextGenerator(nn.Module, ABC):
             "num_layers": self.num_layers,
             "dropout": self.dropout_rate,
             "dim": self.dim,
-            "device": self.device,
+            "device": str(self.device),
         }
 
     def train_model(
